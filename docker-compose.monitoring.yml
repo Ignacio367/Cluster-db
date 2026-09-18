@@ -1,0 +1,76 @@
+# Stack de observabilidad. Requiere el cluster ya levantado (usa su red).
+#   docker compose -f docker-compose.monitoring.yml up -d
+
+x-exporter: &exporter
+  image: prom/mysqld-exporter:v0.14.0
+  restart: unless-stopped
+  command: ["--collect.global_status","--collect.global_variables","--collect.info_schema.innodb_metrics"]
+  networks: [galera-net]
+
+services:
+
+  exporter1:
+    <<: *exporter
+    container_name: exporter1
+    environment: {DATA_SOURCE_NAME: "monitorizacion:${MONITOR_PASSWORD}@(galera1:3306)/"}
+
+  exporter2:
+    <<: *exporter
+    container_name: exporter2
+    environment: {DATA_SOURCE_NAME: "monitorizacion:${MONITOR_PASSWORD}@(galera2:3306)/"}
+
+  exporter3:
+    <<: *exporter
+    container_name: exporter3
+    environment: {DATA_SOURCE_NAME: "monitorizacion:${MONITOR_PASSWORD}@(galera3:3306)/"}
+
+  # CPU, RAM, red e I/O del host
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node_exporter
+    restart: unless-stopped
+    pid: host
+    volumes: ["/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro"]
+    command: ["--path.procfs=/host/proc", "--path.sysfs=/host/sys", "--path.rootfs=/rootfs"]
+    networks: [galera-net]
+
+  # consumo por contenedor (cual nodo gasta mas CPU/RAM)
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes: ["/:/rootfs:ro", "/var/run:/var/run:ro", "/sys:/sys:ro", "/var/lib/docker/:/var/lib/docker:ro"]
+    networks: [galera-net]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alertas.yml:/etc/prometheus/alertas.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    networks: [galera-net]
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${MONITOR_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["3000:3000"]
+    networks: [galera-net]
+    depends_on: [prometheus]
+
+networks:
+  galera-net: {external: true, name: galera-net}
+
+volumes:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,133 @@
+# Cluster-db - MariaDB Galera Cluster (Multi-Master sincrono) + HAProxy
+# 1er arranque: BOOTSTRAP_ARGS=--wsrep-new-cluster en .env  |  despues: vacio
+# Los datos de prueba se generan con: docker exec -it sysbench sysbench ... prepare
+
+# ----- plantilla comun a los 3 nodos (no es un servicio) --------------------
+x-nodo: &nodo
+  image: mariadb:10.11
+  restart: unless-stopped
+  environment:
+    MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD}
+  networks: [galera-net]
+  healthcheck:
+    test: ["CMD-SHELL", "mariadb -uroot -p\"$$MARIADB_ROOT_PASSWORD\" -N -B -e \"SHOW STATUS LIKE 'wsrep_ready'\" | grep -q ON"]
+    interval: 10s
+    retries: 20
+    start_period: 120s
+
+services:
+
+  galera1:
+    <<: *nodo
+    container_name: galera1
+    hostname: galera1
+    command: mysqld --wsrep_node_name=galera1 --wsrep_node_address=galera1 --wsrep_sst_auth=replicacion:${REPL_PASSWORD} ${BOOTSTRAP_ARGS}
+    volumes:
+      - galera1-data:/var/lib/mysql
+      - ./config/galera.cnf:/etc/mysql/conf.d/galera.cnf:ro
+
+  # Contenedor efimero: crea bases y usuarios con el cliente mariadb y termina.
+  # La password de root viaja en MYSQL_PWD; el resto se interpola desde .env.
+  init-usuarios:
+    image: mariadb:10.11
+    container_name: init-usuarios
+    restart: "no"
+    networks: [galera-net]
+    depends_on:
+      galera1: {condition: service_healthy}
+    environment:
+      MYSQL_PWD: ${ROOT_PASSWORD}
+    entrypoint:
+      - mariadb
+      - -hgalera1
+      - -uroot
+      - -e
+      - |
+        CREATE DATABASE IF NOT EXISTS sbtest CHARACTER SET utf8mb4;
+
+        -- administrador: DDL y mantenimiento (reemplaza a root)
+        CREATE USER IF NOT EXISTS 'administrador'@'%' IDENTIFIED BY '${ADMIN_PASSWORD}';
+        GRANT ALL PRIVILEGES ON *.* TO 'administrador'@'%' WITH GRANT OPTION;
+
+        -- replicacion: SST con mariabackup ('localhost' tambien, usa socket)
+        CREATE USER IF NOT EXISTS 'replicacion'@'%' IDENTIFIED BY '${REPL_PASSWORD}';
+        CREATE USER IF NOT EXISTS 'replicacion'@'localhost' IDENTIFIED BY '${REPL_PASSWORD}';
+        GRANT RELOAD, PROCESS, LOCK TABLES, BINLOG MONITOR, REPLICA MONITOR,
+              REPLICATION SLAVE ADMIN, REPLICATION SLAVE, REPLICATION CLIENT
+          ON *.* TO 'replicacion'@'%';
+        GRANT RELOAD, PROCESS, LOCK TABLES, BINLOG MONITOR, REPLICA MONITOR,
+              REPLICATION SLAVE ADMIN, REPLICATION SLAVE, REPLICATION CLIENT
+          ON *.* TO 'replicacion'@'localhost';
+
+        -- aplicacion: solo DML sobre la base de trabajo (sin DROP/ALTER)
+        CREATE USER IF NOT EXISTS 'aplicacion'@'%' IDENTIFIED BY '${APP_PASSWORD}';
+        GRANT SELECT, INSERT, UPDATE, DELETE ON sbtest.* TO 'aplicacion'@'%';
+
+        -- monitorizacion: solo lectura de estado (mysqld-exporter)
+        CREATE USER IF NOT EXISTS 'monitorizacion'@'%' IDENTIFIED BY '${MONITOR_PASSWORD}';
+        GRANT PROCESS, REPLICATION CLIENT, SLAVE MONITOR, SELECT ON *.* TO 'monitorizacion'@'%';
+
+        -- bench: DDL solo en sbtest (sysbench crea y borra tablas)
+        CREATE USER IF NOT EXISTS 'bench'@'%' IDENTIFIED BY '${BENCH_PASSWORD}';
+        GRANT ALL PRIVILEGES ON sbtest.* TO 'bench'@'%';
+
+        -- haproxy_check: sin password ni privilegios, solo el health check
+        CREATE USER IF NOT EXISTS 'haproxy_check'@'%';
+
+        FLUSH PRIVILEGES;
+
+  galera2:
+    <<: *nodo
+    container_name: galera2
+    hostname: galera2
+    command: mysqld --wsrep_node_name=galera2 --wsrep_node_address=galera2 --wsrep_sst_auth=replicacion:${REPL_PASSWORD}
+    volumes:
+      - galera2-data:/var/lib/mysql
+      - ./config/galera.cnf:/etc/mysql/conf.d/galera.cnf:ro
+    depends_on:
+      init-usuarios: {condition: service_completed_successfully}
+
+  galera3:
+    <<: *nodo
+    container_name: galera3
+    hostname: galera3
+    command: mysqld --wsrep_node_name=galera3 --wsrep_node_address=galera3 --wsrep_sst_auth=replicacion:${REPL_PASSWORD}
+    volumes:
+      - galera3-data:/var/lib/mysql
+      - ./config/galera.cnf:/etc/mysql/conf.d/galera.cnf:ro
+    depends_on:
+      galera2: {condition: service_healthy}
+
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: haproxy
+    restart: unless-stopped
+    volumes: ["./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    ports: ["3307:3306", "3308:3307", "8404:8404"]   # rr / escritor unico / stats
+    networks: [galera-net]
+    depends_on:
+      galera1: {condition: service_healthy}
+
+  adminer:
+    image: adminer:4-standalone
+    container_name: adminer
+    restart: unless-stopped
+    environment: {ADMINER_DEFAULT_SERVER: haproxy, ADMINER_DESIGN: dracula}
+    ports: ["8080:8080"]
+    networks: [galera-net]
+
+  sysbench:
+    build: ./tests
+    container_name: sysbench
+    command: ["sleep", "infinity"]
+    env_file: .env
+    volumes: ["./results:/results"]
+    networks: [galera-net]
+
+networks:
+  galera-net: {name: galera-net}
+
+volumes:
+  galera1-data:
+  galera2-data:
+  galera3-data:
