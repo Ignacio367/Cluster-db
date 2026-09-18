@@ -1,0 +1,131 @@
+# Cluster-db - MariaDB Galera Cluster (Multi-Master sincrono) + HAProxy
+# Uso:
+#   1er arranque:  BOOTSTRAP_ARGS="--wsrep-new-cluster" en .env  -> docker compose up -d
+#   arranques posteriores: BOOTSTRAP_ARGS= (vacio)               -> docker compose up -d
+
+services:
+
+  # ---------------------------------------------------------------- NODO 1
+  galera1:
+    image: mariadb:10.11
+    container_name: galera1
+    hostname: galera1
+    restart: unless-stopped
+    command: mysqld ${BOOTSTRAP_ARGS}
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      REPL_PASSWORD: ${REPL_PASSWORD}
+      APP_PASSWORD: ${APP_PASSWORD}
+      MONITOR_PASSWORD: ${MONITOR_PASSWORD}
+      BENCH_PASSWORD: ${BENCH_PASSWORD}
+      APP_DB: ${APP_DB}
+    volumes:
+      - galera1-data:/var/lib/mysql
+      - ./config/galera-common.cnf:/etc/mysql/conf.d/00-galera-common.cnf:ro
+      - ./node1/node.cnf:/etc/mysql/conf.d/10-node.cnf:ro
+      - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
+    networks: [galera-net]
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -uroot -p\"$$MARIADB_ROOT_PASSWORD\" -N -B -e \"SHOW STATUS LIKE 'wsrep_ready'\" | grep -q ON"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # ---------------------------------------------------------------- NODO 2
+  galera2:
+    image: mariadb:10.11
+    container_name: galera2
+    hostname: galera2
+    restart: unless-stopped
+    command: mysqld
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD}
+    volumes:
+      - galera2-data:/var/lib/mysql
+      - ./config/galera-common.cnf:/etc/mysql/conf.d/00-galera-common.cnf:ro
+      - ./node2/node.cnf:/etc/mysql/conf.d/10-node.cnf:ro
+    networks: [galera-net]
+    depends_on:
+      galera1: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -uroot -p\"$$MARIADB_ROOT_PASSWORD\" -N -B -e \"SHOW STATUS LIKE 'wsrep_ready'\" | grep -q ON"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  # ---------------------------------------------------------------- NODO 3
+  galera3:
+    image: mariadb:10.11
+    container_name: galera3
+    hostname: galera3
+    restart: unless-stopped
+    command: mysqld
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD}
+    volumes:
+      - galera3-data:/var/lib/mysql
+      - ./config/galera-common.cnf:/etc/mysql/conf.d/00-galera-common.cnf:ro
+      - ./node3/node.cnf:/etc/mysql/conf.d/10-node.cnf:ro
+    networks: [galera-net]
+    depends_on:
+      galera2: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -uroot -p\"$$MARIADB_ROOT_PASSWORD\" -N -B -e \"SHOW STATUS LIKE 'wsrep_ready'\" | grep -q ON"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  # ------------------------------------------------- BALANCEADOR / PROXY
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: haproxy
+    restart: unless-stopped
+    volumes:
+      - ./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "3307:3306"   # lectura+escritura, round-robin entre los 3 nodos
+      - "3308:3307"   # escritor unico (galera1 activo, 2 y 3 en backup)
+      - "8404:8404"   # panel de estado HAProxy
+    networks: [galera-net]
+    depends_on:
+      galera1: {condition: service_healthy}
+
+  # ---------------------------------------------------------- CLIENTE WEB
+  adminer:
+    image: adminer:4-standalone
+    container_name: adminer
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: haproxy
+      ADMINER_DESIGN: dracula
+    ports:
+      - "8080:8080"
+    networks: [galera-net]
+    depends_on: [haproxy]
+
+  # ------------------------------------------------- CLIENTE DE PRUEBAS
+  sysbench:
+    build: ./tests
+    container_name: sysbench
+    # se mantiene vivo para entrar con docker exec
+    command: ["sleep", "infinity"]
+    env_file: .env
+    volumes:
+      - ./results:/results
+      - ./scripts:/scripts:ro
+    networks: [galera-net]
+    depends_on: [haproxy]
+
+networks:
+  galera-net:
+    name: galera-net
+    driver: bridge
+
+volumes:
+  galera1-data:
+  galera2-data:
+  galera3-data:

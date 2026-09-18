@@ -1,0 +1,3 @@
+[mysqld]
+wsrep_node_name    = galera2
+wsrep_node_address = galera2

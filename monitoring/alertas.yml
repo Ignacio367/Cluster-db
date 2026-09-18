@@ -1,0 +1,23 @@
+groups:
+  - name: cluster-galera
+    rules:
+      - alert: NodoCaido
+        expr: mysql_up == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Nodo {{ $labels.nodo }} no responde"
+
+      - alert: ClusterSinQuorum
+        expr: mysql_global_status_wsrep_cluster_size < 2
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "El cluster perdio el quorum (size < 2)"
+
+      - alert: FlowControlActivo
+        expr: rate(mysql_global_status_wsrep_flow_control_paused_ns[1m]) > 0.1
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Flow control: un nodo no alcanza a aplicar los write-sets"
