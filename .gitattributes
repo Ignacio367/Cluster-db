@@ -1,3 +1,4 @@
 *.sh text eol=lf
 *.cnf text eol=lf
 *.cfg text eol=lf
+*.bat text eol=crlf

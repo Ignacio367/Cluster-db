@@ -209,3 +209,9 @@ MaxScale con detección de estado Galera), nodos en hosts distintos, health chec
 por script `clustercheck` que lea `wsrep_local_state`, TLS en conexiones y
 replicación, backups automatizados con mariabackup, y
 `innodb_flush_log_at_trx_commit=1` (aquí está en 2 para el laboratorio).
+
+## 9. Scripts de operación
+
+Los comandos largos están envueltos en `scripts\*.bat` (Windows). Ver
+`scripts/LEEME.md`. Resumen: `reset.bat` (desde cero), `levantar.bat`,
+`apagar.bat`, `estado.bat`, `replicacion.bat`, `bench.bat [clientes] [rr|escritor]`.
