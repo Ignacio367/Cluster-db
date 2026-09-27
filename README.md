@@ -215,3 +215,92 @@ replicación, backups automatizados con mariabackup, y
 Los comandos largos están envueltos en `scripts\*.bat` (Windows). Ver
 `scripts/LEEME.md`. Resumen: `reset.bat` (desde cero), `levantar.bat`,
 `apagar.bat`, `estado.bat`, `replicacion.bat`, `bench.bat [clientes] [rr|escritor]`.
+
+## 10. Defensa — verificación dirigida a un nodo
+
+Durante las pruebas de fallo, los comandos de estado deben apuntar **a un nodo
+vivo**, nunca al que se acaba de tumbar: si `galera1` está caído, preguntar a
+`galera2` o `galera3`.
+
+```bash
+docker exec galera2 mariadb -uroot -proot_2026 -e "SHOW STATUS LIKE 'wsrep_cluster%'"
+```
+
+Lectura: `wsrep_cluster_size` = nodos vivos · `wsrep_cluster_status` = `Primary`
+(hay quórum) o `non-Primary` (sin mayoría, rechaza consultas).
+
+### Secuencia completa de la prueba
+
+| # | Acción | Comando |
+|---|---|---|
+| 1 | Cae el nodo | `docker kill galera1` |
+| 2 | Revisar clúster | `docker exec galera2 mariadb -uroot -proot_2026 -e "SHOW STATUS LIKE 'wsrep_cluster%'"` → `size 2`, `Primary` |
+| 3 | Revisar en Grafana | Explore → Prometheus → `mysql_up` (exporter1 = 0) y `mysql_global_status_wsrep_cluster_size` (= 2) |
+| 4 | Insertar con el nodo caído | ver abajo |
+| 5 | Levantar el nodo | `docker start galera1` y repetir el paso 2 → vuelve a `size 3` |
+| 6 | Comprobar en ese nodo | Adminer con **Servidor: galera1** |
+
+**Paso 4 — tabla de prueba e inserción** (se ejecuta contra un nodo vivo):
+
+```bash
+docker exec galera2 mariadb -uroot -proot_2026 -e "CREATE TABLE IF NOT EXISTS sbtest.demo (id INT AUTO_INCREMENT PRIMARY KEY, texto VARCHAR(50), nodo VARCHAR(20))"
+
+docker exec galera2 mariadb -uroot -proot_2026 -e "INSERT INTO sbtest.demo (texto, nodo) VALUES ('uno', @@wsrep_node_name), ('dos', @@wsrep_node_name), ('tres', @@wsrep_node_name)"
+```
+
+La columna `nodo` guarda dónde se escribió cada fila: al leerla luego en
+`galera1` seguirá diciendo `galera2`, lo que prueba que la fila viajó por
+replicación y no se generó localmente (efecto de `binlog_format=ROW`).
+
+**Paso 6 — comprobar que el nodo recuperado tiene los datos.** Adminer debe
+conectarse **directo al nodo**, no al balanceador: con `haproxy` el round-robin
+podría responder desde otro nodo y la prueba no demostraría nada.
+
+| Campo | Valor |
+|---|---|
+| Sistema | MySQL |
+| Servidor | **galera1** |
+| Usuario | `aplicacion` |
+| Contraseña | `app_2026` |
+| Base de datos | `sbtest` |
+
+```sql
+SELECT @@wsrep_node_name;   -- confirma que la sesión está en galera1
+SELECT * FROM demo;         -- las 3 filas insertadas mientras estaba caído
+```
+
+Adminer resuelve `galera1` por DNS interno de Docker porque comparte la red
+`galera-net`; desde el host no sería posible, ya que el `3306` de los nodos no
+se publica.
+
+Equivalente por terminal, si no se usa cliente gráfico:
+
+```bash
+docker exec galera1 mariadb -uroot -proot_2026 -e "SELECT @@wsrep_node_name; SELECT * FROM sbtest.demo;"
+```
+
+### Si `docker start galera1` falla
+
+Síntoma: `It may not be safe to bootstrap the cluster from this node`. Causa:
+el nodo se terminó con `kill` (sin apagado ordenado), por lo que su
+`grastate.dat` quedó con `safe_to_bootstrap: 0`, y además `BOOTSTRAP_ARGS`
+seguía activa. Es la protección de Galera contra split-brain funcionando.
+
+```bash
+# .env debe tener:  BOOTSTRAP_ARGS=
+docker compose up -d --no-deps --force-recreate galera1
+```
+
+### Qué decir en cada paso
+
+- **Caída de n1:** en Galera no hay maestro que promover — los tres nodos ya son
+  escritores. Lo único que conmuta es el destino del tráfico en HAProxy, en unos
+  4 s (`inter 2s × fall 2`).
+- **Clúster en 2/3:** sigue en `Primary` porque conserva la mayoría; con un solo
+  nodo pasaría a `non-Primary` y rechazaría toda consulta.
+- **Inserción con un nodo caído:** se acepta con normalidad; el commit se
+  certifica contra el quórum presente.
+- **Reincorporación:** llega por **IST** (solo el delta, desde la `gcache` de
+  256 MB) y no por SST completo, porque el hueco es pequeño.
+- **Datos en n1:** las 3 filas están, sin intervención manual. Es la evidencia
+  de RPO = 0.
