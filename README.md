@@ -216,31 +216,42 @@ Los comandos largos están envueltos en `scripts\*.bat` (Windows). Ver
 `scripts/LEEME.md`. Resumen: `reset.bat` (desde cero), `levantar.bat`,
 `apagar.bat`, `estado.bat`, `replicacion.bat`, `bench.bat [clientes] [rr|escritor]`.
 
-## 10. Defensa — verificación dirigida a un nodo
+## 10. Procedimiento de verificación de failover y recuperación
 
-Durante las pruebas de fallo, los comandos de estado deben apuntar **a un nodo
-vivo**, nunca al que se acaba de tumbar: si `galera1` está caído, preguntar a
-`galera2` o `galera3`.
+Procedimiento operativo para validar la continuidad del servicio ante la caída
+de un nodo y la correcta reincorporación de sus datos. Aplica a cualquier nodo;
+se documenta con `galera1` a modo de ejemplo.
+
+### 10.1 Consulta de estado con un nodo fuera de servicio
+
+Los comandos de estado deben ejecutarse **contra un nodo activo**: un nodo
+detenido no responde a `docker exec`. Si el nodo evaluado es `galera1`, la
+consulta se dirige a `galera2` o `galera3`.
 
 ```bash
 docker exec galera2 mariadb -uroot -proot_2026 -e "SHOW STATUS LIKE 'wsrep_cluster%'"
 ```
 
-Lectura: `wsrep_cluster_size` = nodos vivos · `wsrep_cluster_status` = `Primary`
-(hay quórum) o `non-Primary` (sin mayoría, rechaza consultas).
+| Variable | Interpretación |
+|---|---|
+| `wsrep_cluster_size` | Nodos que integran la membresía en ese momento |
+| `wsrep_cluster_status` | `Primary` = hay quórum · `non-Primary` = sin mayoría, rechaza consultas |
+| `wsrep_local_state_comment` | `Synced` = nodo al día · `Joiner`/`Donor` = transferencia en curso |
 
-### Secuencia completa de la prueba
+### 10.2 Secuencia de prueba
 
-| # | Acción | Comando |
+| Paso | Acción | Resultado esperado |
 |---|---|---|
-| 1 | Cae el nodo | `docker kill galera1` |
-| 2 | Revisar clúster | `docker exec galera2 mariadb -uroot -proot_2026 -e "SHOW STATUS LIKE 'wsrep_cluster%'"` → `size 2`, `Primary` |
-| 3 | Revisar en Grafana | Explore → Prometheus → `mysql_up` (exporter1 = 0) y `mysql_global_status_wsrep_cluster_size` (= 2) |
-| 4 | Insertar con el nodo caído | ver abajo |
-| 5 | Levantar el nodo | `docker start galera1` y repetir el paso 2 → vuelve a `size 3` |
-| 6 | Comprobar en ese nodo | Adminer con **Servidor: galera1** |
+| 1 | `docker kill galera1` | Fallo abrupto, sin apagado ordenado |
+| 2 | Consulta de estado (10.1) | `wsrep_cluster_size = 2`, `Primary` |
+| 3 | Verificación en Grafana / Prometheus | `mysql_up{nodo="galera1"} = 0`; `wsrep_cluster_size = 2` en los nodos activos |
+| 4 | Escritura con el nodo fuera de servicio | Las transacciones se confirman con normalidad |
+| 5 | `docker start galera1` + estado | Reincorporación y retorno a `wsrep_cluster_size = 3` |
+| 6 | Lectura dirigida al nodo recuperado | Los registros escritos en el paso 4 están presentes |
 
-**Paso 4 — tabla de prueba e inserción** (se ejecuta contra un nodo vivo):
+### 10.3 Escritura durante la indisponibilidad
+
+Se ejecuta contra un nodo activo del clúster:
 
 ```bash
 docker exec galera2 mariadb -uroot -proot_2026 -e "CREATE TABLE IF NOT EXISTS sbtest.demo (id INT AUTO_INCREMENT PRIMARY KEY, texto VARCHAR(50), nodo VARCHAR(20))"
@@ -248,59 +259,63 @@ docker exec galera2 mariadb -uroot -proot_2026 -e "CREATE TABLE IF NOT EXISTS sb
 docker exec galera2 mariadb -uroot -proot_2026 -e "INSERT INTO sbtest.demo (texto, nodo) VALUES ('uno', @@wsrep_node_name), ('dos', @@wsrep_node_name), ('tres', @@wsrep_node_name)"
 ```
 
-La columna `nodo` guarda dónde se escribió cada fila: al leerla luego en
-`galera1` seguirá diciendo `galera2`, lo que prueba que la fila viajó por
-replicación y no se generó localmente (efecto de `binlog_format=ROW`).
+La columna `nodo` registra el nodo donde se originó cada fila. Al consultarla
+posteriormente desde otro nodo conserva el valor original: con
+`binlog_format=ROW` se replica el valor ya resuelto y no la sentencia, lo que
+garantiza el mismo resultado en todos los nodos.
 
-**Paso 6 — comprobar que el nodo recuperado tiene los datos.** Adminer debe
-conectarse **directo al nodo**, no al balanceador: con `haproxy` el round-robin
-podría responder desde otro nodo y la prueba no demostraría nada.
+### 10.4 Verificación dirigida a un nodo concreto
+
+Para comprobar el estado de los datos de un nodo en particular, el cliente debe
+conectarse **directamente a ese nodo** y no al balanceador: a través de
+`haproxy` el algoritmo round-robin podría resolver la consulta en otro nodo y la
+verificación no sería concluyente.
 
 | Campo | Valor |
 |---|---|
 | Sistema | MySQL |
-| Servidor | **galera1** |
+| Servidor | `galera1` |
 | Usuario | `aplicacion` |
-| Contraseña | `app_2026` |
 | Base de datos | `sbtest` |
 
 ```sql
-SELECT @@wsrep_node_name;   -- confirma que la sesión está en galera1
-SELECT * FROM demo;         -- las 3 filas insertadas mientras estaba caído
+SELECT @@wsrep_node_name;   -- confirma el nodo que atiende la sesión
+SELECT * FROM demo;         -- registros replicados durante la indisponibilidad
 ```
 
-Adminer resuelve `galera1` por DNS interno de Docker porque comparte la red
-`galera-net`; desde el host no sería posible, ya que el `3306` de los nodos no
-se publica.
+Adminer resuelve el nombre `galera1` mediante el DNS interno de Docker por
+compartir la red `galera-net`. Desde el host no sería posible, ya que el puerto
+`3306` de los nodos no se publica.
 
-Equivalente por terminal, si no se usa cliente gráfico:
+Equivalente por línea de comandos:
 
 ```bash
 docker exec galera1 mariadb -uroot -proot_2026 -e "SELECT @@wsrep_node_name; SELECT * FROM sbtest.demo;"
 ```
 
-### Si `docker start galera1` falla
+### 10.5 Recuperación tras un cierre abrupto
 
-Síntoma: `It may not be safe to bootstrap the cluster from this node`. Causa:
-el nodo se terminó con `kill` (sin apagado ordenado), por lo que su
-`grastate.dat` quedó con `safe_to_bootstrap: 0`, y además `BOOTSTRAP_ARGS`
-seguía activa. Es la protección de Galera contra split-brain funcionando.
+Si el arranque del nodo falla con `It may not be safe to bootstrap the cluster
+from this node`, el nodo fue terminado sin apagado ordenado y su `grastate.dat`
+quedó con `safe_to_bootstrap: 0`, mientras `BOOTSTRAP_ARGS` permanecía activa.
+Es el mecanismo de Galera que impide que un nodo con datos potencialmente
+rezagados funde un clúster paralelo.
 
 ```bash
-# .env debe tener:  BOOTSTRAP_ARGS=
+# .env debe contener:  BOOTSTRAP_ARGS=
 docker compose up -d --no-deps --force-recreate galera1
 ```
 
-### Qué decir en cada paso
+### 10.6 Comportamiento observado
 
-- **Caída de n1:** en Galera no hay maestro que promover — los tres nodos ya son
-  escritores. Lo único que conmuta es el destino del tráfico en HAProxy, en unos
-  4 s (`inter 2s × fall 2`).
-- **Clúster en 2/3:** sigue en `Primary` porque conserva la mayoría; con un solo
-  nodo pasaría a `non-Primary` y rechazaría toda consulta.
-- **Inserción con un nodo caído:** se acepta con normalidad; el commit se
-  certifica contra el quórum presente.
-- **Reincorporación:** llega por **IST** (solo el delta, desde la `gcache` de
-  256 MB) y no por SST completo, porque el hueco es pequeño.
-- **Datos en n1:** las 3 filas están, sin intervención manual. Es la evidencia
-  de RPO = 0.
+- **Continuidad del servicio.** El clúster mantiene el quórum con 2 de 3 nodos y
+  permanece en `Primary`. No existe promoción de primario: los tres nodos ya son
+  escritores activos y la conmutación ocurre únicamente en el balanceador, en
+  aproximadamente 4 s (`inter 2s × fall 2`).
+- **Escrituras durante la indisponibilidad.** Se certifican contra el quórum
+  presente y se confirman con normalidad.
+- **Reincorporación.** Se resuelve por **IST**, transfiriendo solo el delta
+  disponible en la `gcache` de 256 MB, sin recurrir a un SST completo.
+- **Integridad de los datos.** Los registros escritos durante la indisponibilidad
+  están presentes en el nodo recuperado sin intervención manual, lo que verifica
+  el objetivo de RPO = 0.
