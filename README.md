@@ -84,6 +84,18 @@ está corriendo con el comando con el que fue creado, y no vuelve a leer el
 `.env`. Para que el cambio tenga efecto es necesario recrear el contenedor una
 única vez:
 
+## Comando de referencia rápida: estado del clúster
+
+```bash
+docker exec galera1 mariadb -uroot -proot_2026 -e "SHOW STATUS LIKE 'wsrep_cluster%'"
+```
+
+Devuelve `wsrep_cluster_size` (nodos activos), `wsrep_cluster_status`
+(`Primary` = con quórum) y `wsrep_local_state_comment` (`Synced` = al día).
+Si el nodo consultado está caído, dirigir el comando a otro nodo activo
+(ver 10.1). Es el comando base para validar el clúster en cualquier punto
+del procedimiento de la sección 10.
+
 ```bash
 docker compose up -d --no-deps --force-recreate galera1
 ```
@@ -134,10 +146,7 @@ por socket Unix durante el SST.
 Generada por sysbench: 10 tablas × 100.000 filas ≈ 1.000.000 de filas.
 
 ```bash
-docker exec -it sysbench sysbench oltp_common \
-  --db-driver=mysql --mysql-host=haproxy --mysql-port=3306 \
-  --mysql-user=bench --mysql-password=TU_PASS --mysql-db=sbtest \
-  --tables=10 --table-size=100000 --threads=8 prepare
+docker exec -it sysbench sysbench oltp_common --db-driver=mysql --mysql-host=haproxy --mysql-port=3306 --mysql-user=bench --mysql-password=TU_PASS --mysql-db=sbtest --tables=10 --table-size=100000 --threads=8 prepare
 ```
 
 Hasta ejecutar esto, Adminer no muestra tablas: es normal.
@@ -165,11 +174,7 @@ otro nodo con `docker exec galera3 mariadb ... -e "SELECT ..."`, sin esperar.
 Base del comando (cambia `--threads` y la etiqueta):
 
 ```bash
-docker exec -it sysbench sysbench oltp_read_write \
-  --db-driver=mysql --mysql-host=haproxy --mysql-port=3306 \
-  --mysql-user=bench --mysql-password=TU_PASS --mysql-db=sbtest \
-  --tables=10 --table-size=100000 \
-  --threads=50 --time=60 --report-interval=5 run
+docker exec -it sysbench sysbench oltp_read_write --db-driver=mysql --mysql-host=haproxy --mysql-port=3306 --mysql-user=bench --mysql-password=TU_PASS --mysql-db=sbtest --tables=10 --table-size=100000 --threads=50 --time=60 --report-interval=5 run
 ```
 
 | Escenario | Comando | Qué observar |
