@@ -79,6 +79,21 @@ Debe dar `3`, `Primary`, `Synced`. **Si no da 3, no avanzar.**
 **Luego del primer arranque: dejar `BOOTSTRAP_ARGS=` vacío en `.env`.** Volver a
 bootstrapear crearía un clúster nuevo y partiría la membresía (split-brain).
 
+Editar el `.env` no alcanza por sí solo: el proceso `mysqld` de `galera1` ya
+está corriendo con el comando con el que fue creado, y no vuelve a leer el
+`.env`. Para que el cambio tenga efecto es necesario recrear el contenedor una
+única vez:
+
+```bash
+docker compose up -d --no-deps --force-recreate galera1
+```
+
+A partir de ese momento, el contenedor arranca sin el parámetro de bootstrap,
+por lo que sucesivos `docker stop galera1` / `docker start galera1` (o un
+`docker compose down` / `up` ordenado) lo reincorporan al clúster existente sin
+intervención adicional. Omitir este paso produce, en el siguiente arranque, el
+error descrito en 10.5.
+
 Apagar con `docker compose down` (sin `-v`, que borra los datos). El orden
 importa: `galera1` debe salir último para quedar `safe_to_bootstrap: 1`.
 
