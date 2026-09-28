@@ -277,6 +277,8 @@ Se ejecuta contra un nodo activo del clúster:
 docker exec galera2 mariadb -uroot -proot_2026 -e "CREATE TABLE IF NOT EXISTS sbtest.demo (id INT AUTO_INCREMENT PRIMARY KEY, texto VARCHAR(50), nodo VARCHAR(20))"
 
 docker exec galera2 mariadb -uroot -proot_2026 -e "INSERT INTO sbtest.demo (texto, nodo) VALUES ('uno', @@wsrep_node_name), ('dos', @@wsrep_node_name), ('tres', @@wsrep_node_name)"
+
+docker exec galera2 mariadb -uroot -proot_2026 -e "SELECT * FROM sbtest.demo"
 ```
 
 La columna `nodo` registra el nodo donde se originó cada fila. Al consultarla
